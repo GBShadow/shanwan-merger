@@ -201,12 +201,56 @@ cat /sys/module/usbcore/parameters/quirks     # deve conter 2563:0575:r
   `6.12.57+deb13-amd64` vs headers `mos`); requer instalar o kernel
   mos e rebootar. O merger é a solução que funciona hoje.
 
+## Recalbox / Batocera (Buildroot — sem apt/systemd)
+
+O Recalbox não tem apt/dnf/pacman nem systemd, e o `python-evdev` não
+existe no image dele. Para esses sistemas existe o
+**`recalbox-merger.py`**: versão do merger usando **apenas a biblioteca
+padrão do Python** (os/struct/fcntl/select — sem python-evdev).
+Funciona em qualquer Recalbox/Batocera (arquitetura 64-bit ou 32-bit).
+
+**Testado** (2026-08-16): criou o uinput com as mesmas caps, e captura
+de LT/RT no virtual confirmou `ABS_GAS`/`ABS_BRAKE` (8x cada).
+
+### Instalação no Recalbox
+
+```bash
+# do seu PC, via SSH (recalbox vem com ssh habilitado):
+scp recalbox-merger.py install-recalbox.sh root@<ip-do-recalbox>:/tmp/
+ssh root@<ip-do-recalbox> 'sh /tmp/install-recalbox.sh'
+```
+
+O `install-recalbox.sh`:
+1. Copia o merger para `/recalbox/share/system/shanwan/`;
+2. Cria/atualiza `/recalbox/share/system/custom.sh` (executado no boot
+   pelo `S99custom`) com o merger em loop de reinício automático —
+   equivalente ao `Restart=always` do systemd (reinicia sozinho se o
+   controle for replugado);
+3. Verifica o quirk `usbcore.quirks=2563:0575:r` no cmdline do kernel.
+
+Depois: reinicie o Recalbox (ou `sh /etc/init.d/S99custom start`).
+Log: `/recalbox/share/system/logs/shanwan-merger.log`
+
+> **Quirk sem systemd**: o quirk vai na linha de comando do kernel.
+> No Raspberry Pi: edite `/boot/cmdline.txt` e acrescente
+> `usbcore.quirks=2563:0575:r` ao final da linha única existente.
+> Em x86: `/boot/recalbox-cmdline.txt` se existir.
+
+### Rollback no Recalbox
+
+```bash
+ssh root@<ip-do-recalbox> 'rm -rf /recalbox/share/system/shanwan && \
+  sed -i "/# --- ShanWan merger/,/fi/d" /recalbox/share/system/custom.sh'
+```
+
 ## Arquivos
 
 | Arquivo                                   | Papel                                  |
 |-------------------------------------------|----------------------------------------|
 | `merger.py`                               | daemon (une nós evdev → uinput)        |
+| `recalbox-merger.py`                      | versão stdlib pura (Recalbox/Batocera) |
 | `setup.sh`                                | instala/remove tudo automaticamente    |
+| `install-recalbox.sh`                     | instala no Recalbox via custom.sh      |
 | `shanwan-merger.service`                  | unit systemd do daemon                 |
 | `STATUS.md`                               | histórico completo do projeto          |
 
