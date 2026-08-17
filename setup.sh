@@ -47,6 +47,44 @@ require_merger_py() {
     [[ -f "$MERGER_PY" ]] || die "nao encontrei merger.py em $MERGER_PY (rode o script da raiz do projeto)"
 }
 
+# --- deteccao de distro / gerenciador de pacotes ---------------------------------
+# Suportadas: Debian/Ubuntu/MiniOS (apt), Fedora (dnf), Arch/Manjaro (pacman).
+PKG_MGR=""
+EVDEV_PKG=""
+
+detect_distro() {
+    if command -v apt-get >/dev/null 2>&1; then
+        PKG_MGR="apt"
+        EVDEV_PKG="python3-evdev"
+        say "distro detectada: Debian/Ubuntu (apt-get)"
+    elif command -v dnf >/dev/null 2>&1; then
+        PKG_MGR="dnf"
+        EVDEV_PKG="python3-evdev"
+        say "distro detectada: Fedora (dnf)"
+    elif command -v pacman >/dev/null 2>&1; then
+        PKG_MGR="pacman"
+        EVDEV_PKG="python-evdev"
+        say "distro detectada: Arch/Manjaro (pacman)"
+    else
+        die "gerenciador de pacotes nao suportado (apt/dnf/pacman). Instale manualmente o pacote 'python-evdev' e rode de novo."
+    fi
+}
+
+install_evdev() {
+    case "$PKG_MGR" in
+        apt)
+            apt-get update -y >/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$EVDEV_PKG" >/dev/null
+            ;;
+        dnf)
+            dnf install -y "$EVDEV_PKG" >/dev/null
+            ;;
+        pacman)
+            pacman -Sy --noconfirm "$EVDEV_PKG" >/dev/null
+            ;;
+    esac
+}
+
 check_system() {
     # verifica que o kernel tem uinput
     if [[ ! -e /dev/uinput ]] && ! modprobe uinput 2>/dev/null; then
@@ -54,13 +92,12 @@ check_system() {
     fi
     # python3 + evdev
     if ! command -v python3 >/dev/null 2>&1; then
-        die "python3 nao instalado. Instale: sudo apt install python3"
+        die "python3 nao instalado. Instale primeiro: apt/dnf/pacman install python3"
     fi
     if ! python3 -c "import evdev" 2>/dev/null; then
-        say "instalando python3-evdev (dependencia do merger)..."
-        apt-get update -y >/dev/null
-        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-evdev
-        python3 -c "import evdev" || die "falhou em instalar python3-evdev"
+        say "instalando $EVDEV_PKG (dependencia do merger)..."
+        install_evdev
+        python3 -c "import evdev" || die "falhou em instalar $EVDEV_PKG via $PKG_MGR - instale manualmente e rode de novo"
     fi
 }
 
@@ -126,6 +163,7 @@ EOF
 do_install() {
     require_root
     require_merger_py
+    detect_distro
     check_system
 
     say "=============================================="

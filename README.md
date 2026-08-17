@@ -39,10 +39,20 @@ O `merger.py`:
 
 ## Requisitos
 
-- Linux com `systemd` (Debian/Ubuntu/MiniOS testado)
-- `python3` + `python3-evdev`
+- Linux com `systemd` (Debian/Ubuntu/MiniOS, **Fedora**, **Arch/Manjaro**)
+- `python3` + `python-evdev` (instalado automaticamente pelo setup.sh)
 - Kernel com `uinput` (padrão na maioria das distros)
 - O controle conectado via USB
+
+> **Compatibilidade do setup.sh**: detecta o gerenciador de pacotes
+> automaticamente — `apt-get` (Debian/Ubuntu/MiniOS), `dnf` (Fedora)
+> ou `pacman` (Arch/Manjaro) — e instala o pacote evdev correto
+> (`python3-evdev` vs `python-evdev`).
+>
+> **Não suportado**: Recalbox/Batocera e outros sistemas baseados em
+> Buildroot — sem apt/dnf/pacman, filesystem read-only e init próprio
+> (sem systemd). Para esses, rode o `merger.py` manualmente ou monte
+> o boot do próprio sistema.
 
 ## Instalação automática (recomendado)
 
