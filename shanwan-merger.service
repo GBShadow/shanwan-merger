@@ -6,7 +6,7 @@ Wants=usbcore-shanwan-quirk.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/gbshadow/projects/shanwan-merger/merger.py
+ExecStart=/usr/bin/python3 /home/gbshadow/Documentos/shanwan-merger/merger.py
 Restart=always
 RestartSec=2
 TimeoutStopSec=3

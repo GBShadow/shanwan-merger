@@ -687,3 +687,165 @@ sudo /sbin/depmod -a 2>/dev/null
 # Replugar o USB apos rollback. Controle voltara a apresentar o bug
 # de Start/Clear como volume keys (sintoma original).
 ```
+
+---
+
+## 9. Sessão 2 — Máquina Fedora 44, emulação Xbox 360 e ferramenta de remapeamento
+
+> As seções 1–8 acima documentam a máquina original (MiniOS/Debian, HP
+> PresarioCQ18). Esta seção documenta uma **sessão de continuidade em outra
+> máquina**: **Fedora 44**, kernel `7.1.8-200.fc44.x86_64`, usuário
+> `gbshadow`. O repositório foi clonado em
+> `/home/gbshadow/Documentos/shanwan-merger/` (não mais em `~/projects/`).
+
+### 9.1 Instalação do zero nesta máquina
+
+- `sudo ./setup.sh` detectou Fedora (`dnf`), instalou `python3-evdev`,
+  criou as units systemd (`shanwan-merger.service`,
+  `usbcore-shanwan-quirk.service`) e a regra udev — tudo idempotente, igual
+  ao fluxo Debian original.
+- `ExecStart` do `shanwan-merger.service` foi ajustado para o novo caminho
+  do repo (`/home/gbshadow/Documentos/shanwan-merger/merger.py`).
+
+### 9.2 Motor de Turbo / Clear (nova funcionalidade)
+
+Implementado no `merger.py`/`recalbox-merger.py`:
+
+- **Turbo** (botão físico "Turbo", papel `TURBO`): segurar + pressionar
+  outro botão **ativa** repetição automática (~16 Hz / intervalo 35 ms)
+  nesse botão. Estado persistido em `turbo_state.json` (sobrevive a
+  reinício do serviço).
+- **Clear** (botão físico "Clear", papel `CLEAR`): segurar + pressionar um
+  botão com turbo ativo **desativa** a repetição dele. Segurar **Clear
+  sozinho por >1.5 s** limpa todos os turbos de uma vez.
+
+### 9.3 Bug crítico descoberto: mapeamento trocado no AntiMicroX/Steam
+
+**Sintoma:** mesmo com o `merger.py` emitindo os códigos evdev corretos
+(`BTN_TL` para LB, `BTN_NORTH` para X, etc.), o AntiMicroX e a Steam
+mostravam os botões **trocados** — ex.: apertar `LB` acendia `Y` na tela;
+`LT` acendia `LB`+`RT` simultaneamente; `RB` e `Y` ficavam mudos.
+
+**Causa raiz (confirmada empiricamente via SDL2/ctypes):** o AntiMicroX e a
+Steam usam a **SDL2 GameControllerDB**, que identifica um controle por
+**GUID** (derivado de `bus:vendor:product:version` +, em SDL2 ≥ 2.24, um
+**CRC16 do nome do dispositivo** embutido nos bytes 4–5 do GUID — descoberta
+só depois de comparar o GUID calculado manualmente com o GUID real lido via
+`SDL_JoystickGetDeviceGUID`). Como o dispositivo virtual reaproveitava o
+VID/PID do ShanWan físico (`20BC:5501`), o SDL tentava aplicar mapeamentos
+de entradas antigas da DB (por **índice posicional joydev**, não por nome
+de código evdev) — e a ordem de botões do nosso virtual não batia com
+nenhuma entrada existente, gerando leitura cruzada.
+
+**Diagnóstico foi feito escrevendo um script Python com `ctypes` que carrega
+`libSDL2-2.0.so.0` diretamente e chama `SDL_JoystickGetDeviceGUID` /
+`SDL_GameControllerGetButton` / `SDL_GameControllerGetAxis`** — permitindo
+simular pressionamentos via `UInput.write()` num dispositivo de teste e ver
+exatamente que botão o SDL reportava, sem depender de capturas de tela ou
+testes manuais repetidos no AntiMicroX.
+
+### 9.4 Solução definitiva: emular um Xbox 360 Controller genuíno
+
+Em vez de lutar contra a GameControllerDB, o dispositivo virtual passou a
+se identificar exatamente como um **Xbox 360 Controller com fio** (driver
+`xpad` do kernel):
+
+- **VID/PID/versão:** `045E:028E` / versão `0x0110` (Microsoft).
+- **Ordem de capacidades EV_KEY/EV_ABS** idêntica à do `xpad` real: botões
+  `BTN_SOUTH,BTN_EAST,BTN_NORTH,BTN_WEST,BTN_TL,BTN_TR,BTN_SELECT,
+  BTN_START,BTN_MODE,BTN_THUMBL,BTN_THUMBR`; eixos `ABS_X,ABS_Y,ABS_Z,
+  ABS_RX,ABS_RY,ABS_RZ,ABS_HAT0X,ABS_HAT0Y`.
+- **Gatilhos LT/RT tornaram-se puramente analógicos** (`ABS_Z`/`ABS_RZ`,
+  0–255) — **sem** botão digital duplicado (`BTN_TL2`/`BTN_TR2` removidos),
+  exatamente como um Xbox 360 real (que não tem gatilho digital).
+
+Isso ativa o reconhecimento **nativo e embutido** do SDL2 (sem precisar de
+nenhuma entrada em `gamecontrollerdb.txt`) — validado com:
+
+1. Um dispositivo de teste isolado (`UInput` fake) → todos os 8 botões +
+   2 eixos leram corretamente via `SDL_GameControllerGetButton/GetAxis`.
+2. O **serviço real em produção** (`shanwan-merger.service` rodando) →
+   confirmado ao vivo pressionando o controle físico: `LB, Y, RB, LT, RT,
+   A, B, X` todos reportados corretamente pelo SDL2.
+3. Teste manual do usuário no **AntiMicroX e na Steam** → todos os botões
+   funcionando.
+
+### 9.5 Refatoração: mapeamento em arquivo externo (`mapping.json`)
+
+Para permitir remapear o controle **sem editar código Python**, o
+mapeamento físico→papel foi extraído para
+`/home/gbshadow/Documentos/shanwan-merger/mapping.json`:
+
+```json
+{
+  "A":      {"device": "joystick", "code": 308},
+  "B":      {"device": "joystick", "code": 309},
+  "X":      {"device": "joystick", "code": 305},
+  "Y":      {"device": "joystick", "code": 306},
+  "LB":     {"device": "joystick", "code": 304},
+  "RB":     {"device": "joystick", "code": 311},
+  "LT":     {"device": "joystick", "code": 307},
+  "RT":     {"device": "joystick", "code": 310},
+  "SELECT": {"device": "joystick", "code": 314},
+  "START":  {"device": "consumer", "code": 115},
+  "MODE":   {"device": "joystick", "code": 315},
+  "TURBO":  {"device": "joystick", "code": 316},
+  "CLEAR":  {"device": "consumer", "code": 114}
+}
+```
+
+- `merger.py` e `recalbox-merger.py` carregam esse arquivo no início
+  (`load_mapping()`), construindo `{(device_tag, code): role}`.
+- O **alvo Xbox** de cada papel (`ROLE_TARGETS`) é fixo no código — só o
+  código físico de origem é configurável.
+- O D-pad (nó "Keyboard", `KEY_UP/DOWN/LEFT/RIGHT`) permanece fixo, fora do
+  arquivo de mapeamento — é estrutural, não um "botão" remapeável.
+
+### 9.6 Ferramenta de remapeamento: `remap.py`
+
+Script interativo standalone para remapear sem precisar do agente:
+
+```bash
+# Remapeia TODOS os 13 papéis, um de cada vez, na ordem A B X Y LB RB LT RT SELECT START MODE TURBO CLEAR
+sudo python3 remap.py
+
+# Remapeia só os papéis citados (nessa ordem) — útil pra corrigir 1-2 botões
+sudo python3 remap.py Y RB LT
+
+# Mostra o mapeamento atual sem alterar nada
+sudo python3 remap.py --list
+```
+
+Fluxo interno:
+
+1. Para `shanwan-merger.service` (evita conflito de `EVIOCGRAB`).
+2. Abre e trava (grab exclusivo) os 3 nós físicos do ShanWan.
+3. Para cada papel pedido, imprime o nome e bloqueia até detectar um
+   `EV_KEY` com `value==1` em qualquer um dos 3 nós (ignora códigos do
+   D-pad, que nunca podem virar papel).
+4. Salva `mapping.json` **incrementalmente** (a cada papel capturado) — se
+   o usuário cancelar com `Ctrl+C` no meio, o progresso não se perde.
+5. Reinicia o serviço automaticamente ao final.
+
+### 9.7 Arquivos desta sessão
+
+| Caminho                                   | Papel                                            |
+|--------------------------------------------|--------------------------------------------------|
+| `merger.py`                                 | daemon principal (evdev), emula Xbox 360, lê `mapping.json` |
+| `recalbox-merger.py`                        | equivalente stdlib-only p/ Recalbox/Batocera, mesmo `mapping.json` |
+| `mapping.json`                              | mapeamento físico→papel, editável só via `remap.py` |
+| `remap.py`                                  | ferramenta interativa de remapeamento (`sudo python3 remap.py`) |
+| `turbo_state.json`                          | estado persistido dos botões com turbo ativo (gitignored) |
+| `shanwan-merger.service`                    | unit systemd (path do repo atualizado p/ Fedora)  |
+
+**Removido nesta sessão** (obsoleto, substituído por `remap.py`):
+`capture_mapping.py`, `captured_mapping.json`, `capture_history.log`.
+
+### 9.8 Estado final confirmado
+
+- `shanwan-merger.service`: `active (running)`, `enabled`.
+- Dispositivo virtual: `Xbox 360 Controller` (`045E:028E`), reconhecido
+  nativamente por SDL2/AntiMicroX/Steam.
+- Todos os 13 papéis (A, B, X, Y, LB, RB, LT, RT, Select, Start, Mode,
+  Turbo, Clear) testados e funcionando no hardware real.
+- Turbo/Clear funcionais e persistidos em disco.

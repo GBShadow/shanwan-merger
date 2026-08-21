@@ -1,0 +1,16 @@
+{
+  "_comment": "Mapeamento físico -> papel Xbox 360. Gerado/editado por remap.py. NÃO edite os targets manualmente — use 'sudo python3 remap.py' para remapear.",
+  "A":      {"device": "joystick", "code": 308},
+  "B":      {"device": "joystick", "code": 309},
+  "X":      {"device": "joystick", "code": 305},
+  "Y":      {"device": "joystick", "code": 306},
+  "LB":     {"device": "joystick", "code": 304},
+  "RB":     {"device": "joystick", "code": 311},
+  "LT":     {"device": "joystick", "code": 307},
+  "RT":     {"device": "joystick", "code": 310},
+  "SELECT": {"device": "joystick", "code": 314},
+  "START":  {"device": "consumer", "code": 115},
+  "MODE":   {"device": "joystick", "code": 315},
+  "TURBO":  {"device": "joystick", "code": 316},
+  "CLEAR":  {"device": "consumer", "code": 114}
+}

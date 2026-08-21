@@ -1,52 +1,75 @@
 #!/usr/bin/env python3
-"""SHANWAN Android-mode merger.
+"""SHANWAN Android-mode merger — Emula um Xbox 360 Controller genuíno.
 
-Une os varios evdev do gamepad ShanWan (20bc:5501) em um joystick
-virtual unico via uinput.
+O dispositivo virtual criado usa VID/PID/versão e ordem exata de capacidades
+do driver `xpad` (Microsoft Xbox 360 Controller: 045E:028E). Isso faz com que
+SDL2, Steam e praticamente todo jogo/emulador Linux reconheçam o controle
+NATIVAMENTE, sem depender de nenhuma entrada em GameControllerDB — validado
+via SDL2 (SDL_GameControllerGetButton/GetAxis) com hardware real.
 
-Layout dos nos deste aparelho em modo Android (todos vid/pid 20bc:5501):
-  joystick  (event20, iface 1.0)  faces/axes/ABS_HAT em caps (mas o
-                                   dpad real NAO emite aqui)
-  consumer  (event22, iface 1.1)  "Consumer Control" -> Start/Clear chegam
-                                   como KEY_VOLUMEUP/KEY_VOLUMEDOWN
-  keyboard  (event23, iface 1.1)  "Keyboard" -> D-pad/alavanca chegam como
-                                   KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT
-                                   (alem de volume keys duplicados)
+O mapeamento físico -> papel Xbox é carregado de `mapping.json` (mesma pasta).
+Para remapear os botões sem editar código, use:
 
-Traducao aplicada no virtual (uinput) "SHANWAN Android Gamepad (merged)":
-  KEY_VOLUMEUP   -> BTN_START
-  KEY_VOLUMEDOWN -> BTN_SELECT
-  KEY_UP/DOWN    -> ABS_HAT0Y (-1 / +1)
-  KEY_LEFT/RIGHT -> ABS_HAT0X (-1 / +1)
-Eventos do no joystick sao encaminhados 1:1 (faces, ABS_X/Y, ABS_Z/RZ,
-ABS_GAS/BRAKE).
+    sudo python3 remap.py            # remapeia tudo, na ordem A B X Y LB RB LT RT SELECT START MODE TURBO CLEAR
+    sudo python3 remap.py Y RB       # remapeia só os papéis citados
 
-Os nos consumer e keyboard sao abertos com EVIOCGRAB (grab exclusivo)
-para que suas teclas (volume Setas) parem de chegar ao TTY/XSession,
-evitando setas fantasma no terminal e OSD de volume.
+Papéis suportados (ROLE_TARGETS) e efeito no dispositivo virtual:
+  A, B, X, Y, LB, RB, SELECT, START, MODE -> botão digital (EV_KEY)
+  LT, RT                                   -> eixo analógico puro (EV_ABS, 0-255)
+  TURBO, CLEAR                             -> modificadores do motor de turbo (não viram botão)
+
+Motor Turbo / Clear:
+  - Segure TURBO + pressione um botão -> ativa repetição ~16 Hz (persistida em disco).
+  - Segure CLEAR + pressione um botão -> desativa a repetição desse botão.
+  - CLEAR longo (>1.5s) sem combinação -> limpa todos os turbos.
 """
 import os
 import sys
+import json
 import time
 import select
 import signal
 import logging
 
 import evdev
-from evdev import InputDevice, UInput, ecodes
+from evdev import InputDevice, UInput, ecodes, AbsInfo
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(process)d %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s (PID %(process)d): %(message)s"
+)
 log = logging.getLogger("shanwan-merger")
 
 VID = 0x20BC
 PID = 0x5501
-VIRT_NAME_TAG = "(merged)"
-VIRTUAL_NAME = "SHANWAN Android Gamepad (merged)"
+VIRTUAL_NAME = "Xbox 360 Controller"
 
-START_SRC = ecodes.KEY_VOLUMEUP
-SELECT_SRC = ecodes.KEY_VOLUMEDOWN
+VIRTUAL_VID     = 0x045E
+VIRTUAL_PID     = 0x028E
+VIRTUAL_VERSION = 0x0110
 
+SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
+MAPPING_FILE     = os.path.join(SCRIPT_DIR, "mapping.json")
+TURBO_STATE_FILE = os.path.join(SCRIPT_DIR, "turbo_state.json")
+
+# Papel -> ("KEY", código_virtual) | ("AXIS", eixo_virtual)
+# LT/RT são só eixo analógico, sem botão digital — igual ao Xbox 360 real.
+ROLE_TARGETS = {
+    "A":      ("KEY",  ecodes.BTN_SOUTH),
+    "B":      ("KEY",  ecodes.BTN_EAST),
+    "X":      ("KEY",  ecodes.BTN_NORTH),
+    "Y":      ("KEY",  ecodes.BTN_WEST),
+    "LB":     ("KEY",  ecodes.BTN_TL),
+    "RB":     ("KEY",  ecodes.BTN_TR),
+    "LT":     ("AXIS", ecodes.ABS_Z),
+    "RT":     ("AXIS", ecodes.ABS_RZ),
+    "SELECT": ("KEY",  ecodes.BTN_SELECT),
+    "START":  ("KEY",  ecodes.BTN_START),
+    "MODE":   ("KEY",  ecodes.BTN_MODE),
+}
+SPECIAL_ROLES = {"TURBO", "CLEAR"}  # modificadores — não viram botão no virtual
+
+# D-pad (nó Keyboard) — fixo, não faz parte do remapeamento de botões
 ARROW_MAP = {
     ecodes.KEY_UP:    (ecodes.ABS_HAT0Y, -1),
     ecodes.KEY_DOWN:  (ecodes.ABS_HAT0Y,  1),
@@ -54,38 +77,41 @@ ARROW_MAP = {
     ecodes.KEY_RIGHT: (ecodes.ABS_HAT0X,  1),
 }
 
-# Traducao de gatilhos em forma de botao para forma de eixo analógico.
-# Muitos gamepads arcade (este ShanWan inclusive) nao tem eixo analogico
-# real nos gatilhos - o firmware os reporta como botões.
-# CAPTURA CONFIRMADA via evtest: neste aparelho, os gatilhos fisicos
-# LT e RT chegam ao nó joystick (event4) como os codigos
-#   RT fisico -> BTN_C (code 306) -> aparece como botão "2" no jstest-gtk
-#   LT fisico -> BTN_Z (code 309) -> aparece como botão "5" no jstest-gtk
-#
-# IMPORTANTE - como a Steam/SDL enumeram eixos POR POSICAO (indice),
-# e nao por nome, o virtual device precisa declarar os eixos na ordem
-# que a Steam Input espera no layout generico:
-#   indice 0 = ABS_X   (left stick X)
-#   indice 1 = ABS_Y   (left stick Y)
-#   indice 2 = ABS_Z   (right stick X - dummy, nunca emite)
-#   indice 3 = ABS_RZ  (right stick Y - dummy, nunca emite)
-#   indice 4 = ABS_GAS   (LT - USAR para o gatilho esquerdo)
-#   indice 5 = ABS_BRAKE (RT - USAR para o gatilho direito)
-# Por isso usamos GAS/BRAKE em vez de Z/RZ: ABS_Z/ABS_RZ caem nos
-# indices 2/3, que a Steam le como "alavanca direita" (bug observado).
-# Traduzimos: pressionar = 255, soltar = 0.
-# Importante: SUPRIMIMOS o evento do botao original para a Steam nao
-# enxergar dois inputs conflitantes para o mesmo gatilho (BTN_C/BTN_Z
-# seriam enxergados como botoes de face extras caso nao suprimissemos).
-TRIGGER_BTN_TO_AXIS = {
-    ecodes.BTN_C: ecodes.ABS_BRAKE,  # jstest btn "2" (RT fisico) -> ABS_BRAKE (indice 5 = RT)
-    ecodes.BTN_Z: ecodes.ABS_GAS,    # jstest btn "5" (LT fisico) -> ABS_GAS (indice 4 = LT)
-}
-TRIGGER_PRESSED_VAL = 255
-TRIGGER_RELEASED_VAL = 0
+TRIGGER_PRESSED  = 255
+TRIGGER_RELEASED = 0
+TURBO_INTERVAL   = 0.035   # ~16 Hz
 
-EXTRA_BTNS = [ecodes.BTN_START, ecodes.BTN_SELECT]
-POLL_TIMEOUT_MS = 1000
+
+# ---------------------------------------------------------------------------
+def load_mapping():
+    """Lê mapping.json -> { (device_tag, code): role_name }."""
+    with open(MAPPING_FILE) as f:
+        raw = json.load(f)
+    by_source = {}
+    for role, entry in raw.items():
+        if role.startswith("_"):
+            continue
+        by_source[(entry["device"], entry["code"])] = role
+    log.info("mapping.json carregado: %d papéis", len(by_source))
+    return by_source
+
+
+def load_turbo_state():
+    try:
+        if os.path.exists(TURBO_STATE_FILE):
+            with open(TURBO_STATE_FILE) as f:
+                return set(json.load(f).get("turbo_roles", []))
+    except Exception as e:
+        log.warning("turbo_state load failed: %s", e)
+    return set()
+
+
+def save_turbo_state(s):
+    try:
+        with open(TURBO_STATE_FILE, "w") as f:
+            json.dump({"turbo_roles": sorted(s)}, f, indent=2)
+    except Exception as e:
+        log.warning("turbo_state save failed: %s", e)
 
 
 def looks_like_shanwan(dev):
@@ -96,15 +122,10 @@ def looks_like_shanwan(dev):
 
 
 def is_virtual(dev):
-    return VIRT_NAME_TAG in (dev.name or "")
+    return dev.name == VIRTUAL_NAME
 
 
-def is_joystick_node(caps):
-    return ecodes.EV_ABS in caps and bool(caps[ecodes.EV_ABS])
-
-
-def categorize(caps, name):
-    """Retorna 'joystick', 'consumer', 'keyboard' ou None."""
+def categorize(caps, name, by_source):
     n = (name or "").lower()
     if "consumer control" in n:
         return "consumer"
@@ -113,17 +134,15 @@ def categorize(caps, name):
     if "system control" in n:
         return None
     keys = caps.get(ecodes.EV_KEY, [])
-    if START_SRC in keys or SELECT_SRC in keys:
+    if any(("consumer", k) in by_source for k in keys):
         return "consumer"
     if any(k in ARROW_MAP for k in keys):
         return "keyboard"
     return None
 
 
-def discover():
-    joystick = None
-    consumer = None
-    keyboard = None
+def discover(by_source):
+    joystick = consumer = keyboard = None
     leftovers = []
     for path in evdev.list_devices():
         try:
@@ -134,10 +153,11 @@ def discover():
             d.close()
             continue
         caps = d.capabilities()
-        if is_joystick_node(caps) and joystick is None:
+        has_abs = ecodes.EV_ABS in caps and caps[ecodes.EV_ABS]
+        if has_abs and joystick is None:
             joystick = d
             continue
-        cat = categorize(caps, d.name)
+        cat = categorize(caps, d.name, by_source)
         if cat == "consumer" and consumer is None:
             consumer = d
         elif cat == "keyboard" and keyboard is None:
@@ -152,170 +172,199 @@ def discover():
     return joystick, consumer, keyboard
 
 
-def build_uinput(joystick):
-    caps = joystick.capabilities(absinfo=True)
-    safe = {t: c for t, c in caps.items()
-            if t in (ecodes.EV_KEY, ecodes.EV_ABS, ecodes.EV_MSC)}
-    keys = list(safe.setdefault(ecodes.EV_KEY, []))
-    for b in EXTRA_BTNS:
-        if b not in keys:
-            keys.append(b)
-    safe[ecodes.EV_KEY] = keys
-    abslist = list(safe.setdefault(ecodes.EV_ABS, []))
-    abs_codes = {a[0] if isinstance(a, tuple) else a for a in abslist}
-    from evdev import AbsInfo
-    for code in (ecodes.ABS_HAT0X, ecodes.ABS_HAT0Y):
-        if code not in abs_codes:
-            abslist.append((code, AbsInfo(value=0, min=-1, max=1,
-                                          fuzz=0, flat=0, resolution=0)))
-    safe[ecodes.EV_ABS] = abslist
-    ui = UInput(events=safe,
-                name=VIRTUAL_NAME,
-                vendor=VID,
-                product=PID,
-                version=0x0111,
-                bustype=ecodes.BUS_USB)
-    return ui
+def build_uinput():
+    """Cria o dispositivo virtual com capacidades IDÊNTICAS ao Xbox 360 (xpad)."""
+    keys = [
+        ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_NORTH, ecodes.BTN_WEST,
+        ecodes.BTN_TL, ecodes.BTN_TR,
+        ecodes.BTN_SELECT, ecodes.BTN_START, ecodes.BTN_MODE,
+        ecodes.BTN_THUMBL, ecodes.BTN_THUMBR,
+    ]
+    axes = [
+        (ecodes.ABS_X,     AbsInfo(0, -32768, 32767, 16, 128, 0)),
+        (ecodes.ABS_Y,     AbsInfo(0, -32768, 32767, 16, 128, 0)),
+        (ecodes.ABS_Z,     AbsInfo(0, 0, 255, 0, 0, 0)),
+        (ecodes.ABS_RX,    AbsInfo(0, -32768, 32767, 16, 128, 0)),
+        (ecodes.ABS_RY,    AbsInfo(0, -32768, 32767, 16, 128, 0)),
+        (ecodes.ABS_RZ,    AbsInfo(0, 0, 255, 0, 0, 0)),
+        (ecodes.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+        (ecodes.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+    ]
+    return UInput(
+        events={ecodes.EV_KEY: keys, ecodes.EV_ABS: axes},
+        name=VIRTUAL_NAME, vendor=VIRTUAL_VID, product=VIRTUAL_PID,
+        version=VIRTUAL_VERSION, bustype=ecodes.BUS_USB,
+    )
 
 
 def safe_grab(dev, label):
     try:
         dev.grab()
-        log.info("grabbed %s exclusively (%s)", label, dev.path)
-    except Exception as exc:
-        log.warning("could not grab %s (%s): %s; "
-                    "setas/keys podem chegar ao terminal", label, dev.path, exc)
+        log.info("grabbed %s (%s)", label, dev.path)
+    except Exception as e:
+        log.warning("could not grab %s: %s", label, e)
 
 
-def handle_key(ui, ev, btn_state):
-    if ev.code == START_SRC:
-        if btn_state.get(ecodes.BTN_START, 0) != ev.value:
-            ui.write(ecodes.EV_KEY, ecodes.BTN_START, ev.value)
-            btn_state[ecodes.BTN_START] = ev.value
+def emit(ui, role, state):
+    entry = ROLE_TARGETS.get(role)
+    if entry is None:
         return
-    if ev.code == SELECT_SRC:
-        if btn_state.get(ecodes.BTN_SELECT, 0) != ev.value:
-            ui.write(ecodes.EV_KEY, ecodes.BTN_SELECT, ev.value)
-            btn_state[ecodes.BTN_SELECT] = ev.value
-        return
-    if ev.code in ARROW_MAP:
-        axis, sign = ARROW_MAP[ev.code]
-        val = sign if ev.value else 0
-        ui.write(ecodes.EV_ABS, axis, val)
+    if entry[0] == "KEY":
+        ui.write(ecodes.EV_KEY, entry[1], state)
+    else:  # AXIS
+        ui.write(ecodes.EV_ABS, entry[1], TRIGGER_PRESSED if state else TRIGGER_RELEASED)
 
 
 def main():
-    log.info("scanning evdev for ShanWan 20bc:5501 nodes")
-    joystick = None
-    consumer = None
-    keyboard = None
+    log.info("ShanWan merger iniciando — emulação Xbox 360 Controller (045E:028E)")
+    by_source = load_mapping()
+    turbo_roles = load_turbo_state()
+    log.info("Turbos persistidos: %s", sorted(turbo_roles) or "nenhum")
+
+    joystick = consumer = keyboard = None
     for attempt in range(30):
-        joystick, consumer, keyboard = discover()
-        if joystick is not None:
+        joystick, consumer, keyboard = discover(by_source)
+        if joystick:
             break
         time.sleep(1)
         if attempt % 5 == 4:
-            log.info("still waiting for device (attempt %d)", attempt + 1)
-    if joystick is None:
-        log.error("joystick node (EV_ABS) of ShanWan not found")
+            log.info("aguardando dispositivo (tentativa %d)…", attempt + 1)
+    if not joystick:
+        log.error("nó joystick ShanWan não encontrado — abortando")
         sys.exit(1)
-    log.info("joystick node: %s (%s) caps=%s",
-             joystick.name, joystick.path,
-             sorted(joystick.capabilities().keys()))
-    if consumer:
-        log.info("consumer node: %s (%s)", consumer.name, consumer.path)
-    else:
-        log.warning("no consumer-control node; Start/Clear via volume unavailable")
-    if keyboard:
-        log.info("keyboard node: %s (%s)", keyboard.name, keyboard.path)
-    else:
-        log.warning("no keyboard node; D-pad arrows unavailable")
 
+    log.info("joystick : %s (%s)", joystick.name, joystick.path)
     if consumer:
-        safe_grab(consumer, "consumer")
+        log.info("consumer : %s (%s)", consumer.name, consumer.path)
     if keyboard:
-        safe_grab(keyboard, "keyboard")
-    # Grab exclusivo TAMBEM no nó joystick físico: a Steam/SDL leem via
-    # evdev (/dev/input/event*) e ignoram a regra udev (que só afeta o
-    # joydev /dev/input/js1). Com o grab, nenhum outro processo consegue
-    # ler eventos do aparelho original - a Steam so enxerga o merged.
+        log.info("keyboard : %s (%s)", keyboard.name, keyboard.path)
+
+    if consumer: safe_grab(consumer, "consumer")
+    if keyboard: safe_grab(keyboard, "keyboard")
     safe_grab(joystick, "joystick")
 
-    ui = build_uinput(joystick)
-    try:
-        vpath = ui.device
-    except Exception:
-        vpath = "?"
-    log.info("virtual gamepad created: %s", vpath)
+    ui = build_uinput()
+    log.info("virtual  : %s", getattr(ui, "device", "(uinput)"))
 
-    btn_state = {ecodes.BTN_START: 0, ecodes.BTN_SELECT: 0}
+    turbo_mod   = False
+    clear_mod   = False
+    clear_t0    = 0.0
+    held_turbo  = set()   # papéis mantidos pressionados COM turbo ativo
+    turbo_phase = 0
+    last_tick   = time.time()
 
     running = [True]
-
-    def stop(*_):
-        running[0] = False
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, lambda *_: running.__setitem__(0, False))
+    signal.signal(signal.SIGINT,  lambda *_: running.__setitem__(0, False))
 
     poll = select.epoll()
     poll.register(joystick.fd, select.EPOLLIN)
-    fd_to_dev = {}
+    fd_tag = {joystick.fd: "joystick"}
+    fd_dev = {joystick.fd: joystick}
     if consumer:
         poll.register(consumer.fd, select.EPOLLIN)
-        fd_to_dev[consumer.fd] = consumer
+        fd_tag[consumer.fd] = "consumer"
+        fd_dev[consumer.fd] = consumer
     if keyboard:
         poll.register(keyboard.fd, select.EPOLLIN)
-        fd_to_dev[keyboard.fd] = keyboard
+        fd_tag[keyboard.fd] = "keyboard"
+        fd_dev[keyboard.fd] = keyboard
+
+    def handle_role_press(role, v):
+        if v == 1:
+            if turbo_mod:
+                turbo_roles.add(role)
+                save_turbo_state(turbo_roles)
+                log.info("🔥 TURBO ON  %s", role)
+            elif clear_mod:
+                turbo_roles.discard(role)
+                held_turbo.discard(role)
+                save_turbo_state(turbo_roles)
+                log.info("❄️  TURBO OFF %s", role)
+            elif role in turbo_roles:
+                held_turbo.add(role)
+            else:
+                emit(ui, role, 1)
+                ui.syn()
+        else:
+            held_turbo.discard(role)
+            emit(ui, role, 0)
+            ui.syn()
 
     try:
         while running[0]:
-            for fd, _ in poll.poll(timeout=POLL_TIMEOUT_MS):
-                if fd == joystick.fd:
-                    for ev in joystick.read():
-                        if ev.type == ecodes.EV_SYN:
-                            ui.syn()
-                        elif ev.type == ecodes.EV_KEY and ev.code in TRIGGER_BTN_TO_AXIS:
-                            axis = TRIGGER_BTN_TO_AXIS[ev.code]
-                            val = TRIGGER_PRESSED_VAL if ev.value else TRIGGER_RELEASED_VAL
-                            ui.write(ecodes.EV_ABS, axis, val)
-                        else:
-                            ui.write(ev.type, ev.code, ev.value)
-                else:
-                    dev = fd_to_dev.get(fd)
-                    if dev is None:
+            evs = poll.poll(timeout=0.020)
+            now = time.time()
+
+            for fd, _ in evs:
+                dev = fd_dev[fd]
+                tag = fd_tag[fd]
+
+                for ev in dev.read():
+                    if ev.type == ecodes.EV_SYN:
+                        ui.syn()
                         continue
-                    for ev in dev.read():
-                        if ev.type == ecodes.EV_KEY:
-                            handle_key(ui, ev, btn_state)
-                    ui.syn()
-    except OSError as exc:
-        log.warning("device disappeared: %s", exc)
+                    if ev.type == ecodes.EV_ABS:
+                        continue  # sem sticks reais neste aparelho
+
+                    if ev.type != ecodes.EV_KEY:
+                        continue
+                    c, v = ev.code, ev.value
+
+                    if tag == "keyboard" and c in ARROW_MAP:
+                        axis, sign = ARROW_MAP[c]
+                        ui.write(ecodes.EV_ABS, axis, sign if v else 0)
+                        ui.syn()
+                        continue
+
+                    role = by_source.get((tag, c))
+                    if role is None:
+                        continue
+
+                    if role == "TURBO":
+                        turbo_mod = bool(v)
+                        continue
+
+                    if role == "CLEAR":
+                        clear_mod = bool(v)
+                        if v == 1:
+                            clear_t0 = now
+                        else:
+                            if clear_t0 and now - clear_t0 >= 1.5 and turbo_roles:
+                                turbo_roles.clear()
+                                held_turbo.clear()
+                                save_turbo_state(turbo_roles)
+                                log.info("🧹 todos os turbos removidos (CLEAR longo)")
+                            clear_t0 = 0.0
+                        continue
+
+                    handle_role_press(role, v)
+
+            if held_turbo and now - last_tick >= TURBO_INTERVAL:
+                turbo_phase ^= 1
+                for role in list(held_turbo):
+                    emit(ui, role, turbo_phase)
+                ui.syn()
+                last_tick = now
+
+    except OSError as e:
+        log.warning("dispositivo removido: %s", e)
         raise
     finally:
-        for fd in [joystick.fd] + list(fd_to_dev.keys()):
-            try:
-                poll.unregister(fd)
-            except Exception:
-                pass
-        for dev in fd_to_dev.values():
-            try:
-                dev.ungrab()
-            except Exception:
-                pass
-            try:
-                dev.close()
-            except Exception:
-                pass
-        try:
-            ui.close()
-        except Exception:
-            pass
-        try:
-            joystick.close()
-        except Exception:
-            pass
-        log.info("shutdown complete")
+        for fd in fd_dev:
+            try: poll.unregister(fd)
+            except Exception: pass
+        for dev in (consumer, keyboard):
+            if dev is None: continue
+            try: dev.ungrab()
+            except Exception: pass
+            try: dev.close()
+            except Exception: pass
+        try: ui.close()
+        except Exception: pass
+        try: joystick.close()
+        except Exception: pass
+        log.info("encerrado")
 
 
 if __name__ == "__main__":
