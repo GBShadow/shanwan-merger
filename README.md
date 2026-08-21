@@ -233,13 +233,13 @@ do `merger.py`. Funciona em qualquer Recalbox/Batocera (64-bit ou 32-bit).
 
 ```bash
 # do seu PC, via SSH (recalbox vem com ssh habilitado):
-scp recalbox-merger.py mapping.json install-recalbox.sh root@<ip-do-recalbox>:/tmp/
+scp recalbox-merger.py mapping.json remap-recalbox.py install-recalbox.sh root@<ip-do-recalbox>:/tmp/
 ssh root@<ip-do-recalbox> 'sh /tmp/install-recalbox.sh'
 ```
 
 O `install-recalbox.sh`:
-1. Copia `recalbox-merger.py` **e `mapping.json`** para
-   `/recalbox/share/system/shanwan/`;
+1. Copia `recalbox-merger.py`, `mapping.json` **e `remap-recalbox.py`**
+   para `/recalbox/share/system/shanwan/`;
 2. Cria/atualiza `/recalbox/share/system/custom.sh` (executado no boot
    pelo `S99custom`) com o merger em loop de reinício automático —
    equivalente ao `Restart=always` do systemd;
@@ -248,11 +248,30 @@ O `install-recalbox.sh`:
 Depois: reinicie o Recalbox (ou `sh /etc/init.d/S99custom start`).
 Log: `/recalbox/share/system/logs/shanwan-merger.log`
 
-> **Remapear no Recalbox:** o `remap.py` depende de `evdev`
-> (Python puro, não disponível no Recalbox) e não roda lá. Remapeie
-> primeiro numa máquina Linux normal (`sudo python3 remap.py`), depois
-> copie o `mapping.json` atualizado por `scp` para
-> `/recalbox/share/system/shanwan/mapping.json` e reinicie o serviço.
+### Remapeando direto no Recalbox (`remap-recalbox.py`)
+
+Não é preciso outra máquina Linux — o `remap-recalbox.py` é a versão
+**stdlib pura** do `remap.py` (mesma interface, sem depender de
+`python-evdev`) e roda direto no Recalbox via SSH:
+
+```bash
+ssh root@<ip-do-recalbox>
+cd /recalbox/share/system/shanwan
+
+# remapear TODOS os 13 papéis, um de cada vez
+python3 remap-recalbox.py
+
+# remapear só alguns papéis específicos
+python3 remap-recalbox.py Y RB LT
+
+# ver o mapeamento atual
+python3 remap-recalbox.py --list
+```
+
+O script mata o `recalbox-merger.py` em execução, trava os 3 nós físicos,
+captura os botões pedidos e salva em `mapping.json`. Não precisa reiniciar
+o Recalbox nem o serviço manualmente — o loop do `custom.sh` respawna o
+merger sozinho em até 2 segundos, já com o mapeamento atualizado.
 
 > **Quirk sem systemd**: o quirk vai na linha de comando do kernel.
 > No Raspberry Pi: edite `/boot/cmdline.txt` e acrescente
@@ -272,8 +291,9 @@ ssh root@<ip-do-recalbox> 'rm -rf /recalbox/share/system/shanwan && \
 |---------------------------|----------------------------------------------------|
 | `merger.py`                | daemon principal (evdev), emula Xbox 360 Controller, lê `mapping.json` |
 | `recalbox-merger.py`       | mesma lógica em stdlib puro (Recalbox/Batocera)     |
-| `mapping.json`             | mapeamento físico→papel; editável só via `remap.py` |
-| `remap.py`                 | ferramenta interativa de remapeamento               |
+| `mapping.json`             | mapeamento físico→papel; editável via `remap.py` (Fedora/Debian/Arch) ou `remap-recalbox.py` (Recalbox) |
+| `remap.py`                 | ferramenta interativa de remapeamento (requer python-evdev) |
+| `remap-recalbox.py`        | mesma ferramenta em stdlib puro (Recalbox/Batocera) |
 | `turbo_state.json`         | estado dos botões com turbo ativo (gerado em runtime, git-ignorado) |
 | `setup.sh`                 | instala/remove tudo automaticamente (systemd)       |
 | `install-recalbox.sh`      | instala no Recalbox via `custom.sh`                 |

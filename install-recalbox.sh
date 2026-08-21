@@ -5,13 +5,14 @@
 # Recalbox usa init do BusyBox (nao systemd). O boot roda
 # /recalbox/share/system/custom.sh, que e o ponto de entrada.
 # Este script:
-#   1. Copia recalbox-merger.py e mapping.json para /recalbox/share/system/shanwan/
+#   1. Copia recalbox-merger.py, mapping.json e remap-recalbox.py para
+#      /recalbox/share/system/shanwan/
 #   2. Cria / atualiza custom.sh para iniciar o merger no boot
 #      (com loop de reinicio - equivalente ao Restart=always)
 #   3. (Opcional) adiciona usbcore.quirks ao cmdline do kernel
 #
 # Como rodar (via SSH, como root):
-#   scp recalbox-merger.py mapping.json install-recalbox.sh root@<ip-recalbox>:/tmp/
+#   scp recalbox-merger.py mapping.json remap-recalbox.py install-recalbox.sh root@<ip-recalbox>:/tmp/
 #   ssh root@<ip-recalbox> 'sh /tmp/install-recalbox.sh'
 # =============================================================================
 set -e
@@ -20,6 +21,7 @@ SHARE_DIR="/recalbox/share/system"
 APP_DIR="$SHARE_DIR/shanwan"
 MERGER_SRC="$(dirname "$0")/recalbox-merger.py"
 MAPPING_SRC="$(dirname "$0")/mapping.json"
+REMAP_SRC="$(dirname "$0")/remap-recalbox.py"
 
 echo "==> Instalando merger ShanWan no Recalbox"
 
@@ -42,7 +44,14 @@ mkdir -p "$APP_DIR"
 cp "$MERGER_SRC" "$APP_DIR/recalbox-merger.py"
 chmod +x "$APP_DIR/recalbox-merger.py"
 cp "$MAPPING_SRC" "$APP_DIR/mapping.json"
-echo "==> Copiado para $APP_DIR/recalbox-merger.py e mapping.json"
+if [ -f "$REMAP_SRC" ]; then
+    cp "$REMAP_SRC" "$APP_DIR/remap-recalbox.py"
+    chmod +x "$APP_DIR/remap-recalbox.py"
+    echo "==> Copiado para $APP_DIR/ (recalbox-merger.py, mapping.json, remap-recalbox.py)"
+else
+    echo "==> Copiado para $APP_DIR/ (recalbox-merger.py, mapping.json)"
+    echo "==> AVISO: remap-recalbox.py nao encontrado - remapeamento no proprio Recalbox nao estara disponivel"
+fi
 
 # --- custom.sh ---------------------------------------------------------------
 # O S99custom do Recalbox executa custom.sh no boot. Criamos/atualizamos
