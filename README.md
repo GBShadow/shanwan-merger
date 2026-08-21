@@ -14,15 +14,99 @@ que se identifica como um **Xbox 360 Controller genuíno** — reconhecido
 nativamente por SDL2, Steam, RetroArch e qualquer emulador/jogo Linux,
 sem precisar de nenhum arquivo de mapeamento externo (GameControllerDB).
 
+## Índice
+
+- [Especificações do Hardware](#especificações-do-hardware)
+- [Como funciona](#como-funciona)
+- [Requisitos](#requisitos)
+- [Instalação automática (recomendado)](#instalação-automática-recomendado)
+- [Remapeando os botões (`remap.py`)](#remapeando-os-botões-remappy)
+- [Turbo e Clear (repetição automática de botão)](#turbo-e-clear-repetição-automática-de-botão)
+- [Testando](#testando)
+- [Steam, AntiMicroX e SDL2](#steam-antimicrox-e-sdl2)
+- [Diagnóstico rápido](#diagnóstico-rápido)
+- [Limitações conhecidas](#limitações-conhecidas)
+- [Recalbox e Batocera (sistemas Buildroot, sem apt ou systemd)](#recalbox-e-batocera-sistemas-buildroot-sem-apt-ou-systemd)
+  - [Instalação no Recalbox](#instalação-no-recalbox)
+  - [Instalação direto no cartão/HD do Recalbox (offline)](#instalação-direto-no-cartãohd-do-recalbox-offline)
+  - [Remapeando direto no Recalbox (`remap-recalbox.py`)](#remapeando-direto-no-recalbox-remap-recalboxpy)
+  - [Rollback no Recalbox](#rollback-no-recalbox)
+- [Arquivos](#arquivos)
+- [Rollback manual (systemd)](#rollback-manual-systemd)
+
+## Especificações do Hardware
+
+### Identificação USB
+
+| Propriedade          | Valor                                                |
+|-----------------------|-------------------------------------------------------|
+| Fabricante             | ShenZhen ShanWan Technology Co., Ltd.                 |
+| Nome USB               | `Android Gamepad`                                     |
+| VID:PID (modo Android, **efetivo**) | `20bc:5501`                              |
+| VID:PID (modo "real", **enumera e cai**) | `2563:0575` ("PS3/PC Gamepad")      |
+| Barramento             | USB 2.0 (`Bus=0003` nos nós evdev)                    |
+| `lsusb`                | `Bus 002 Device 0XX: ID 20bc:5501 ShenZhen ShanWan Technology Co., Ltd. Android Gamepad` |
+
+**Por que existe o quirk `usbcore.quirks=2563:0575:r`?** Ao plugar, o
+firmware primeiro enumera como `2563:0575` ("modo real", com descritor
+HID correto), mas o kernel Linux rejeita o pedido de descritor de
+configuração (pede só 9 bytes; o firmware devolve o descritor inteiro)
+e o aparelho **cai** ~126 ms depois para o fallback `20bc:5501` ("modo
+Android", com Start/Clear/D-pad quebrados). A flag `r`
+(`USB_QUIRK_WINDOWS_CONFIG_REQ_SIZE`) faz o Linux pedir o descritor com
+255 bytes, como o Windows faz — isso evita a queda inicial, mas o
+firmware ainda entrega um descritor HID malformado em `2563:0575`, então
+o `hid-generic` acaba rejeitando de qualquer forma e o aparelho recai em
+`20bc:5501`. **A quirk continua sendo aplicada** (inofensiva, e mantém a
+porta aberta para uma solução futura via driver de kernel dedicado), mas
+quem resolve o problema **hoje** é o merger userspace, operando
+inteiramente em modo Android (`20bc:5501`).
+
+### Os 3 nós evdev do aparelho (modo Android)
+
+| Nó (nome evdev)                              | Handlers típicos | Conteúdo                                                  |
+|------------------------------------------------|-------------------|------------------------------------------------------------|
+| `SHANWAN Android Gamepad`                       | `eventN js0`      | botões de face/ombro/gatilho/Select/Mode/Turbo (`EV_KEY`), eixos declarados mas inertes (`EV_ABS`) |
+| `SHANWAN Android Gamepad Consumer Control`      | `kbd eventN`       | Start/Clear como `KEY_VOLUMEUP`/`KEY_VOLUMEDOWN`           |
+| `SHANWAN Android Gamepad Keyboard`              | `sysrq kbd leds eventN` | D-pad como `KEY_UP`/`KEY_DOWN`/`KEY_LEFT`/`KEY_RIGHT`  |
+| `SHANWAN Android Gamepad System Control`        | `kbd eventN`       | não usado pelo merger (ignorado)                           |
+
+### Tabela completa de mapeamento físico (papel Xbox 360)
+
+Valores confirmados por captura direta de hardware (evento por evento).
+Esta é a configuração padrão de fábrica em `mapping.json` — se você
+remapear com `remap.py`/`remap-recalbox.py`, os códigos podem mudar,
+mas a estrutura (papel → alvo Xbox) permanece a mesma.
+
+| Papel (Xbox 360) | Botão físico no arcade | Nó de origem | Código evdev | Nome no kernel        | Alvo no virtual                  |
+|-------------------|--------------------------|---------------|----------------|--------------------------|-------------------------------------|
+| `A`                 | X (face)                   | joystick      | `308`           | `BTN_WEST` / `BTN_Y`      | `BTN_SOUTH`                          |
+| `B`                 | Bola/Círculo (face)        | joystick      | `309`           | `BTN_Z`                   | `BTN_EAST`                           |
+| `X`                 | Quadrado (face)            | joystick      | `305`           | `BTN_B` / `BTN_EAST`      | `BTN_NORTH`                          |
+| `Y`                 | Triângulo (face)           | joystick      | `306`           | `BTN_C`                   | `BTN_WEST`                           |
+| `LB`                | L1 (ombro esquerdo)        | joystick      | `304`           | `BTN_A` / `BTN_SOUTH`     | `BTN_TL`                             |
+| `RB`                | R1 (ombro direito)         | joystick      | `311`           | `BTN_TR`                  | `BTN_TR`                             |
+| `LT`                | L2 (gatilho esquerdo)      | joystick      | `307`           | `BTN_NORTH` / `BTN_X`     | `ABS_Z` (eixo 0–255, sem botão digital) |
+| `RT`                | R2 (gatilho direito)       | joystick      | `310`           | `BTN_TL`                  | `ABS_RZ` (eixo 0–255, sem botão digital) |
+| `SELECT`            | Select                     | joystick      | `314`           | `BTN_SELECT`              | `BTN_SELECT`                         |
+| `START`             | Start                      | **consumer**  | `115`           | `KEY_VOLUMEUP`            | `BTN_START`                          |
+| `MODE`              | Mode                       | joystick      | `315`           | `BTN_START` *(alias de kernel — não confundir com o papel `START`)* | `BTN_MODE` (Guide/Home) |
+| `TURBO`             | Turbo                      | joystick      | `316`           | `BTN_MODE` *(alias de kernel)* | modificador — não vira botão   |
+| `CLEAR`             | Clear                      | **consumer**  | `114`           | `KEY_VOLUMEDOWN`          | modificador — não vira botão         |
+| D-pad ↑/↓/←/→       | Direcional (cruz)          | **keyboard**  | `103/108/105/106` | `KEY_UP/DOWN/LEFT/RIGHT` | `ABS_HAT0Y`(∓1)/`ABS_HAT0X`(∓1) *(fixo, fora do remapeamento)* |
+
+> **Nota sobre aliases confusos:** os nomes de constante do kernel Linux
+> para os botões de face são só *aliases* posicionais (`BTN_A`==`BTN_SOUTH`==`BTN_GAMEPAD`,
+> `BTN_Y`==`BTN_WEST`, etc.) — não correspondem à letra serigrafada no
+> botão físico. Por isso a tabela acima lista **três** colunas: o nome
+> impresso no arcade, o código numérico real, e o(s) nome(s) de
+> constante do kernel — só o código numérico importa para o mapeamento.
+
 ## Como funciona
 
-O aparelho em modo Android expõe **3 nós evdev** (todos `20bc:5501`):
-
-| Nó físico            | O que carrega                                    |
-|-----------------------|--------------------------------------------------|
-| joystick              | botões de face, ombros (LB/RB), gatilhos (LT/RT como botão), Select, Mode, Turbo |
-| Consumer Control      | Start/Clear como `KEY_VOLUMEUP`/`KEY_VOLUMEDOWN`  |
-| Keyboard              | D-pad como `KEY_UP`/`KEY_DOWN`/`KEY_LEFT`/`KEY_RIGHT` |
+O aparelho em modo Android expõe **3 nós evdev** (todos `20bc:5501`),
+detalhados na seção [Especificações do Hardware](#especificações-do-hardware)
+acima.
 
 O `merger.py`:
 
@@ -79,8 +163,8 @@ sudo ./setup.sh
 O script (idempotente — pode reexecutar à vontade):
 1. Instala `python3-evdev`;
 2. Cria a unit `usbcore-shanwan-quirk.service`
-   (`usbcore.quirks=2563:0575:r` — segura o aparelho no modo
-   Android em vez de piscar para `2563:0575`);
+   (`usbcore.quirks=2563:0575:r` — ver explicação em
+   [Especificações do Hardware](#especificações-do-hardware));
 3. Cria a unit `shanwan-merger.service` (daemon do merger,
    `Restart=always`), apontando para `merger.py` **na pasta onde você
    clonou o repositório**;
@@ -144,7 +228,7 @@ O arquivo gerado (`mapping.json`) fica na raiz do projeto e é lido por
 > O D-pad (nó "Keyboard", `KEY_UP/DOWN/LEFT/RIGHT`) **não** faz parte
 > do remapeamento — é estrutural e permanece fixo.
 
-## Turbo / Clear (repetição automática de botão)
+## Turbo e Clear (repetição automática de botão)
 
 O controle tem dois botões físicos dedicados a esse recurso (mapeados
 nos papéis `TURBO` e `CLEAR` em `mapping.json`):
@@ -182,7 +266,7 @@ Resultado esperado (layout Xbox 360 padrão):
   0 solto → máximo pressionado, **sem** botão duplicado
 - D-pad → hat (Hat0X/Hat0Y, -1/0/+1)
 
-## Steam / AntiMicroX / SDL2
+## Steam, AntiMicroX e SDL2
 
 Como o dispositivo virtual se identifica como um Xbox 360 Controller
 genuíno, **nenhuma configuração adicional é necessária**:
@@ -220,7 +304,7 @@ cat /sys/module/usbcore/parameters/quirks     # deve conter 2563:0575:r
   `STATUS.md` §3.6 para detalhes. O merger userspace é a solução
   usada em produção.
 
-## Recalbox / Batocera (Buildroot — sem apt/systemd)
+## Recalbox e Batocera (sistemas Buildroot, sem apt ou systemd)
 
 O Recalbox não tem apt/dnf/pacman nem systemd, e o `python-evdev` não
 existe na imagem dele. Para esses sistemas existe o
@@ -231,8 +315,10 @@ do `merger.py`. Funciona em qualquer Recalbox/Batocera (64-bit ou 32-bit).
 
 ### Instalação no Recalbox
 
+Com o Recalbox **rodando** (via SSH — vem com SSH habilitado por padrão):
+
 ```bash
-# do seu PC, via SSH (recalbox vem com ssh habilitado):
+# do seu PC:
 scp recalbox-merger.py mapping.json remap-recalbox.py install-recalbox.sh root@<ip-do-recalbox>:/tmp/
 ssh root@<ip-do-recalbox> 'sh /tmp/install-recalbox.sh'
 ```
@@ -247,6 +333,54 @@ O `install-recalbox.sh`:
 
 Depois: reinicie o Recalbox (ou `sh /etc/init.d/S99custom start`).
 Log: `/recalbox/share/system/logs/shanwan-merger.log`
+
+### Instalação direto no cartão/HD do Recalbox (offline)
+
+Se o Recalbox está numa mídia removível (cartão SD ou HD/SSD USB) que
+você pode montar em outro PC Linux, dá para instalar **sem precisar
+ligar o Recalbox nem usar SSH**:
+
+1. Conecte a mídia — o Linux vai montar automaticamente algo como
+   `/run/media/<user>/RECALBOX` (partição de boot, FAT32) e
+   `/run/media/<user>/SHARE` (partição de dados, exFAT/ext4).
+2. Copie os arquivos do merger direto para dentro da partição `SHARE`:
+   ```bash
+   SHARE=/run/media/$USER/SHARE
+   mkdir -p "$SHARE/system/shanwan"
+   cp recalbox-merger.py mapping.json remap-recalbox.py "$SHARE/system/shanwan/"
+   chmod +x "$SHARE/system/shanwan/recalbox-merger.py" "$SHARE/system/shanwan/remap-recalbox.py"
+   ```
+3. Crie (ou acrescente ao já existente) `$SHARE/system/custom.sh`:
+   ```bash
+   cat >> "$SHARE/system/custom.sh" <<'EOF'
+   # --- ShanWan merger (instalado manualmente) ---
+   if [ -x /recalbox/share/system/shanwan/recalbox-merger.py ]; then
+       ( while true; do
+           /usr/bin/python3 /recalbox/share/system/shanwan/recalbox-merger.py \
+               >> /recalbox/share/system/logs/shanwan-merger.log 2>&1
+           sleep 2
+       done ) &
+   fi
+   EOF
+   chmod +x "$SHARE/system/custom.sh"
+   ```
+4. Adicione o quirk USB à linha de kernel na partição de **boot**
+   (`RECALBOX`). Em instalações **x86/PC** (BIOS legado *e* UEFI usam
+   GRUB), edite **os dois** arquivos, acrescentando
+   `usbcore.quirks=2563:0575:r` ao final de cada linha `linux ...`:
+   ```bash
+   BOOT=/run/media/$USER/RECALBOX
+   sed -i 's/\(linux .*\)$/\1 usbcore.quirks=2563:0575:r/' \
+       "$BOOT/boot/grub/grub.cfg" "$BOOT/EFI/BOOT/grub.cfg"
+   ```
+   Em **Raspberry Pi**, o cmdline fica em `$BOOT/cmdline.txt` (uma
+   única linha) — acrescente `usbcore.quirks=2563:0575:r` ao final dela.
+5. `sync` e desmonte/ejete a mídia com segurança antes de remover.
+
+> `boot.md5` (checksums de integridade do boot) só é verificado durante
+> **atualizações OTA** do Recalbox, não no boot normal — a edição acima
+> não é revertida ao ligar. Porém, se você atualizar o sistema depois,
+> reaplique o quirk nos `grub.cfg` (a atualização sobrescreve o boot).
 
 ### Remapeando direto no Recalbox (`remap-recalbox.py`)
 
@@ -272,11 +406,6 @@ O script mata o `recalbox-merger.py` em execução, trava os 3 nós físicos,
 captura os botões pedidos e salva em `mapping.json`. Não precisa reiniciar
 o Recalbox nem o serviço manualmente — o loop do `custom.sh` respawna o
 merger sozinho em até 2 segundos, já com o mapeamento atualizado.
-
-> **Quirk sem systemd**: o quirk vai na linha de comando do kernel.
-> No Raspberry Pi: edite `/boot/cmdline.txt` e acrescente
-> `usbcore.quirks=2563:0575:r` ao final da linha única existente.
-> Em x86: `/boot/recalbox-cmdline.txt` se existir.
 
 ### Rollback no Recalbox
 
