@@ -1,46 +1,61 @@
-# ShanWan Android Gamepad (20bc:5501) — configuração no Linux
+# ShanWan Android Gamepad (20bc:5501) — Emulação Xbox 360 no Linux
 
 Correção completa para o arcade ShanWan que, em modo Android, não
 funciona direito no Linux: Start/Clear viram teclas de volume, o D-pad
-não é lido como direcional de joystick e os gatilhos LT/RT são
-reportados como botões (não como eixos) — a Steam não reconhecia
-nada disso e ainda duplicava o controle.
+vem como setas de teclado (nó separado), e os gatilhos LT/RT são
+reportados como botões de face — Steam e emuladores não reconheciam
+nada disso, viam múltiplos dispositivos duplicados, e ainda cruzavam
+os nomes dos botões.
 
 Este projeto resolve tudo com um **merger userspace** (Python + evdev)
-que lê os vários nós evdev do aparelho, traduz os eventos e cria um
-**joystick virtual único** (`uinput`) que a Steam/SDL reconhecem
-corretamente.
+que lê os 3 nós físicos do aparelho, traduz os eventos segundo um
+mapeamento configurável, e cria um **joystick virtual único** (`uinput`)
+que se identifica como um **Xbox 360 Controller genuíno** — reconhecido
+nativamente por SDL2, Steam, RetroArch e qualquer emulador/jogo Linux,
+sem precisar de nenhum arquivo de mapeamento externo (GameControllerDB).
 
 ## Como funciona
 
 O aparelho em modo Android expõe **3 nós evdev** (todos `20bc:5501`):
 
-| Nó físico            | O que carrega                              |
-|----------------------|--------------------------------------------|
-| joystick             | faces, alavanca analógica, **LT/RT como botões** |
-| Consumer Control     | Start/Clear como `KEY_VOLUMEUP/DOWN`       |
-| Keyboard             | D-pad como `KEY_UP/DOWN/LEFT/RIGHT`        |
+| Nó físico            | O que carrega                                    |
+|-----------------------|--------------------------------------------------|
+| joystick              | botões de face, ombros (LB/RB), gatilhos (LT/RT como botão), Select, Mode, Turbo |
+| Consumer Control      | Start/Clear como `KEY_VOLUMEUP`/`KEY_VOLUMEDOWN`  |
+| Keyboard              | D-pad como `KEY_UP`/`KEY_DOWN`/`KEY_LEFT`/`KEY_RIGHT` |
 
 O `merger.py`:
-1. Abre os 3 nós com **grab exclusivo** (`EVIOCGRAB`) — nenhum outro
-   processo (Steam incluída) consegue ler o aparelho original;
-2. Traduz:
-   - `KEY_VOLUMEUP/DOWN` → `BTN_START` / `BTN_SELECT`
-   - `KEY_UP/DOWN/LEFT/RIGHT` → `ABS_HAT0X/HAT0Y` (D-pad)
-   - `BTN_C` (RT físico) → `ABS_BRAKE` (posição de gatilho direito)
-   - `BTN_Z` (LT físico) → `ABS_GAS` (posição de gatilho esquerdo)
-3. Cria o joystick virtual `SHANWAN Android Gamepad (merged)`.
 
-> **Por que GAS/BRAKE e não Z/RZ?** A Steam/SDL numeram os eixos **por
-> posição (índice)**, não por nome: índice 2/3 = alavanca direita,
-> índice 4/5 = gatilhos. `ABS_Z`/`ABS_RZ` caem nos índices 2/3 (a Steam
-> via LT/RT como "alavanca direita" — bug já observado). `ABS_GAS`/
-> `ABS_BRAKE` caem nos índices 4/5 = LT/RT corretos.
+1. Abre os 3 nós com **grab exclusivo** (`EVIOCGRAB`) — nenhum outro
+   processo (Steam incluída) consegue ler o aparelho físico original;
+2. Carrega `mapping.json` (código físico → papel Xbox: `A B X Y LB RB
+   LT RT SELECT START MODE TURBO CLEAR`);
+3. Traduz cada papel para o código correto no dispositivo virtual:
+   - botões de face/ombro/select/start/mode → `EV_KEY` padrão Xbox
+     (`BTN_SOUTH/EAST/NORTH/WEST/TL/TR/SELECT/START/MODE`)
+   - **LT/RT → eixos analógicos puros** (`ABS_Z`/`ABS_RZ`, 0–255) —
+     igual ao Xbox 360 real, sem botão digital duplicado
+   - D-pad → `ABS_HAT0X`/`ABS_HAT0Y`
+4. Cria o joystick virtual **`Xbox 360 Controller`** com VID/PID
+   `045E:028E` (Microsoft) e a mesma ordem de capacidades do driver
+   `xpad` real — é isso que faz o SDL2 reconhecer tudo nativamente.
+
+> **Por que emular um Xbox 360 e não manter o VID/PID do ShanWan?**
+> SDL2 identifica controles por GUID (derivado de VID/PID/versão +, em
+> versões recentes, um CRC do nome do dispositivo) e mapeia botões por
+> **índice posicional**, não por nome de código evdev. Reaproveitar o
+> VID/PID do ShanWan físico fazia o SDL aplicar entradas antigas da
+> GameControllerDB com ordem de botões incompatível — resultado:
+> LB acendia como Y, LT acendia LB+RT juntos, etc. Emular o Xbox 360
+> real (VID/PID + ordem de capacidades idênticos ao driver `xpad`)
+> ativa o reconhecimento **nativo embutido** do SDL2, sem depender de
+> nenhum arquivo de banco de dados externo. Validado com hardware real
+> via chamadas diretas à libSDL2 (`SDL_GameControllerGetButton/GetAxis`).
 
 ## Requisitos
 
 - Linux com `systemd` (Debian/Ubuntu/MiniOS, **Fedora**, **Arch/Manjaro**)
-- `python3` + `python-evdev` (instalado automaticamente pelo setup.sh)
+- `python3` + `python-evdev` (instalado automaticamente pelo `setup.sh`)
 - Kernel com `uinput` (padrão na maioria das distros)
 - O controle conectado via USB
 
@@ -49,16 +64,15 @@ O `merger.py`:
 > ou `pacman` (Arch/Manjaro) — e instala o pacote evdev correto
 > (`python3-evdev` vs `python-evdev`).
 >
-> **Não suportado**: Recalbox/Batocera e outros sistemas baseados em
-> Buildroot — sem apt/dnf/pacman, filesystem read-only e init próprio
-> (sem systemd). Para esses, rode o `merger.py` manualmente ou monte
-> o boot do próprio sistema.
+> **Não suportado pelo setup.sh**: Recalbox/Batocera e outros sistemas
+> Buildroot — sem apt/dnf/pacman e sem systemd. Use o
+> `install-recalbox.sh` (seção dedicada abaixo).
 
 ## Instalação automática (recomendado)
 
 ```bash
-git clone <este-repo> ~/projects/shanwan-merger   # ou copie a pasta
-cd ~/projects/shanwan-merger
+git clone https://github.com/GBShadow/shanwan-merger.git
+cd shanwan-merger
 sudo ./setup.sh
 ```
 
@@ -68,7 +82,8 @@ O script (idempotente — pode reexecutar à vontade):
    (`usbcore.quirks=2563:0575:r` — segura o aparelho no modo
    Android em vez de piscar para `2563:0575`);
 3. Cria a unit `shanwan-merger.service` (daemon do merger,
-   `Restart=always`);
+   `Restart=always`), apontando para `merger.py` **na pasta onde você
+   clonou o repositório**;
 4. Cria a regra udev `98-shanwan-hide-physical.rules` (auxiliar);
 5. Ativa tudo e mostra a verificação.
 
@@ -78,102 +93,106 @@ Para remover tudo depois:
 sudo ./setup.sh --uninstall
 ```
 
-## Instalação manual (passo a passo)
+## Remapeando os botões (`remap.py`)
+
+Se o layout físico não bater com o esperado (ex.: LB soando como outro
+botão), **não é preciso editar código**. Use a ferramenta interativa:
 
 ```bash
-# 1. dependência
-sudo apt install -y python3-evdev
+# Remapear TODOS os 13 papéis, um de cada vez, na ordem:
+# A B X Y LB RB LT RT SELECT START MODE TURBO CLEAR
+sudo python3 remap.py
 
-# 2. quirk usbcore (unit systemd)
-sudo tee /etc/systemd/system/usbcore-shanwan-quirk.service >/dev/null <<'EOF'
-[Unit]
-Description=Apply usbcore quirk for ShanWan 2563:0575 gamepad
-DefaultDependencies=no
-Before=usb.target
-After=systemd-modules-load.service
+# Remapear só alguns papéis específicos, nessa ordem
+sudo python3 remap.py Y RB LT
 
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'echo "2563:0575:r" > /sys/module/usbcore/parameters/quirks'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=sysinit.target
-EOF
-echo "2563:0575:r" | sudo tee /sys/module/usbcore/parameters/quirks
-
-# 3. merger (unit systemd) — ajuste o caminho do merger.py
-sudo tee /etc/systemd/system/shanwan-merger.service >/dev/null <<EOF
-[Unit]
-Description=ShanWan Android-mode event merger
-DefaultDependencies=no
-After=systemd-udev-trigger.service usbcore-shanwan-quirk.service
-Wants=usbcore-shanwan-quirk.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /home/gbshadow/projects/shanwan-merger/merger.py
-Restart=always
-RestartSec=2
-TimeoutStopSec=3
-KillSignal=SIGTERM
-
-[Install]
-WantedBy=default.target
-EOF
-
-# 4. regra udev (auxiliar)
-sudo tee /etc/udev/rules.d/98-shanwan-hide-physical.rules >/dev/null <<'EOF'
-ACTION=="remove", GOTO="shanwan_hide_end"
-SUBSYSTEM=="input", KERNEL=="event*|js*", \
-    SUBSYSTEMS=="usb", ATTRS{idVendor}=="20bc", ATTRS{idProduct}=="5501", \
-    ENV{ID_INPUT_JOYSTICK}="", \
-    ENV{ID_INPUT_KEY}="", \
-    ENV{ID_INPUT_KEYBOARD}=""
-LABEL="shanwan_hide_end"
-EOF
-
-# 5. ativar tudo
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=input
-sudo systemctl daemon-reload
-sudo systemctl enable --now usbcore-shanwan-quirk.service
-sudo systemctl enable --now shanwan-merger.service
+# Ver o mapeamento atual sem alterar nada
+sudo python3 remap.py --list
 ```
+
+O que a ferramenta faz:
+
+1. Para o `shanwan-merger.service` (evita conflito de grab exclusivo);
+2. Abre e trava os 3 nós físicos do controle;
+3. Para cada papel pedido, mostra o nome e espera você **pressionar
+   uma vez** o botão físico correspondente;
+4. Salva `mapping.json` **incrementalmente** — se você cancelar com
+   `Ctrl+C` no meio, o progresso já feito não se perde;
+5. Reinicia o serviço automaticamente ao terminar.
+
+O arquivo gerado (`mapping.json`) fica na raiz do projeto e é lido por
+`merger.py`/`recalbox-merger.py` a cada início do serviço:
+
+```json
+{
+  "A":      {"device": "joystick", "code": 308},
+  "B":      {"device": "joystick", "code": 309},
+  "X":      {"device": "joystick", "code": 305},
+  "Y":      {"device": "joystick", "code": 306},
+  "LB":     {"device": "joystick", "code": 304},
+  "RB":     {"device": "joystick", "code": 311},
+  "LT":     {"device": "joystick", "code": 307},
+  "RT":     {"device": "joystick", "code": 310},
+  "SELECT": {"device": "joystick", "code": 314},
+  "START":  {"device": "consumer", "code": 115},
+  "MODE":   {"device": "joystick", "code": 315},
+  "TURBO":  {"device": "joystick", "code": 316},
+  "CLEAR":  {"device": "consumer", "code": 114}
+}
+```
+
+> O D-pad (nó "Keyboard", `KEY_UP/DOWN/LEFT/RIGHT`) **não** faz parte
+> do remapeamento — é estrutural e permanece fixo.
+
+## Turbo / Clear (repetição automática de botão)
+
+O controle tem dois botões físicos dedicados a esse recurso (mapeados
+nos papéis `TURBO` e `CLEAR` em `mapping.json`):
+
+- **Ativar turbo:** segure **Turbo** e, ao mesmo tempo, pressione o
+  botão que você quer que repita sozinho (ex.: X). A partir daí,
+  segurar esse botão no jogo dispara cliques automáticos a **~16 Hz**
+  (a cada ~35 ms) enquanto estiver pressionado.
+- **Desativar turbo de um botão:** segure **Clear** e pressione o
+  botão que tem turbo ativo.
+- **Limpar todos os turbos de uma vez:** segure **Clear sozinho** por
+  mais de **1,5 segundo**.
+
+O estado é persistido em `turbo_state.json` (na pasta do projeto) e
+sobrevive a reinícios do serviço/PC.
 
 ## Testando
 
 ```bash
-# veja o joystick virtual
+# veja o joystick virtual (agora aparece como "Xbox 360 Controller")
 for p in /sys/class/input/js*/device; do
   echo "$(basename "$(dirname "$p")") -> $(cat "$p/name")"
 done
 
-# teste interativo (selecione o nó "merged"!)
-sudo evtest /dev/input/js2        # ou o event* correspondente
+# teste interativo — escolha o node cujo nome é "Xbox 360 Controller"
+sudo evtest /dev/input/jsN
 
 # ou com GUI
-jstest-gtk                        # IMPORTANTE: escolha /dev/input/js2
+jstest-gtk                        # escolha o "Xbox 360 Controller"
 ```
 
-Resultado esperado no `jstest-gtk` (js2):
-- A/B/X/Y (botões 0/1/3/4), LB/RB (6/7), Turbo (12)
-- **LT** → eixo **4 (Gas)** varia 0→255
-- **RT** → eixo **5 (Brake)** varia 0→255
-- D-pad → eixos Hat0X/Hat0Y (-1/0/+1)
-- Start/Select respondem
+Resultado esperado (layout Xbox 360 padrão):
+- A/B/X/Y, LB/RB, Back/Start, Guide (mode) — todos como botões digitais
+- **LT/RT** → eixos analógicos puros (`lefttrigger`/`righttrigger`),
+  0 solto → máximo pressionado, **sem** botão duplicado
+- D-pad → hat (Hat0X/Hat0Y, -1/0/+1)
 
-## Steam
+## Steam / AntiMicroX / SDL2
 
-1. **Feche a Steam completamente** (menu Steam → Exit; ou `steam -shutdown`)
-   e reabra — ela re-enumera os controles e o físico ficará invisível
-   (grab do merger);
-2. Configurações → Controle: deve aparecer **apenas um** dispositivo
-   ("SHANWAN Android Gamepad (merged)");
-3. Para configurar bindings, **não use o Wizard** (o botão B/Escape
-   cancela a Wizard por design). Use **Browse Layouts → Generic
-   X-Input** (ou "Arcade Stick") e edite os binds individualmente;
-4. LT/RT aparecem como gatilhos analógicos em jogos.
+Como o dispositivo virtual se identifica como um Xbox 360 Controller
+genuíno, **nenhuma configuração adicional é necessária**:
+
+1. Feche o app completamente e reabra (ele precisa reenumerar
+   controles) — o físico fica invisível (grab exclusivo do merger),
+   só o virtual aparece;
+2. Deve aparecer como **"Xbox 360 Controller"**, reconhecido
+   automaticamente com o layout correto (Steam Input, AntiMicroX,
+   qualquer jogo/emulador via SDL2).
 
 ## Diagnóstico rápido
 
@@ -184,8 +203,8 @@ systemctl is-active shanwan-merger.service usbcore-shanwan-quirk.service
 # log do merger
 journalctl -u shanwan-merger.service -b -e
 
-# quem lê o nó físico? (só o merger deve aparecer em /dev/input/eventN do joystick)
-sudo fuser -v /dev/input/eventN
+# ver o mapeamento carregado
+sudo python3 remap.py --list
 
 # quirk ativo?
 cat /sys/module/usbcore/parameters/quirks     # deve conter 2563:0575:r
@@ -193,43 +212,47 @@ cat /sys/module/usbcore/parameters/quirks     # deve conter 2563:0575:r
 
 ## Limitações conhecidas
 
-- A alavanca analógica é **digital** neste firmware (4 setas, mesmo
-  canal do D-pad) — não há eixo analógico real;
-- Sem rumble/force feedback;
-- Driver de kernel definitivo (`hid-shanwan.c`) foi **compilado mas
-  não carrega** neste MiniOS por mismatch de ABI (kernel
-  `6.12.57+deb13-amd64` vs headers `mos`); requer instalar o kernel
-  mos e rebootar. O merger é a solução que funciona hoje.
+- A alavanca analógica é **digital** neste firmware (vem pelo mesmo
+  canal do D-pad) — não há eixo analógico real de stick;
+- Sem rumble/force feedback (Xbox 360 real tem; o virtual não emite);
+- Driver de kernel definitivo (`hid-shanwan.c`) foi tentado na máquina
+  original (MiniOS) mas bloqueado por mismatch de ABI — ver
+  `STATUS.md` §3.6 para detalhes. O merger userspace é a solução
+  usada em produção.
 
 ## Recalbox / Batocera (Buildroot — sem apt/systemd)
 
 O Recalbox não tem apt/dnf/pacman nem systemd, e o `python-evdev` não
-existe no image dele. Para esses sistemas existe o
+existe na imagem dele. Para esses sistemas existe o
 **`recalbox-merger.py`**: versão do merger usando **apenas a biblioteca
-padrão do Python** (os/struct/fcntl/select — sem python-evdev).
-Funciona em qualquer Recalbox/Batocera (arquitetura 64-bit ou 32-bit).
-
-**Testado** (2026-08-16): criou o uinput com as mesmas caps, e captura
-de LT/RT no virtual confirmou `ABS_GAS`/`ABS_BRAKE` (8x cada).
+padrão do Python** (os/struct/fcntl/select/json — sem python-evdev).
+Usa o **mesmo `mapping.json`** e a mesma emulação de Xbox 360 Controller
+do `merger.py`. Funciona em qualquer Recalbox/Batocera (64-bit ou 32-bit).
 
 ### Instalação no Recalbox
 
 ```bash
 # do seu PC, via SSH (recalbox vem com ssh habilitado):
-scp recalbox-merger.py install-recalbox.sh root@<ip-do-recalbox>:/tmp/
+scp recalbox-merger.py mapping.json install-recalbox.sh root@<ip-do-recalbox>:/tmp/
 ssh root@<ip-do-recalbox> 'sh /tmp/install-recalbox.sh'
 ```
 
 O `install-recalbox.sh`:
-1. Copia o merger para `/recalbox/share/system/shanwan/`;
+1. Copia `recalbox-merger.py` **e `mapping.json`** para
+   `/recalbox/share/system/shanwan/`;
 2. Cria/atualiza `/recalbox/share/system/custom.sh` (executado no boot
    pelo `S99custom`) com o merger em loop de reinício automático —
-   equivalente ao `Restart=always` do systemd (reinicia sozinho se o
-   controle for replugado);
+   equivalente ao `Restart=always` do systemd;
 3. Verifica o quirk `usbcore.quirks=2563:0575:r` no cmdline do kernel.
 
 Depois: reinicie o Recalbox (ou `sh /etc/init.d/S99custom start`).
 Log: `/recalbox/share/system/logs/shanwan-merger.log`
+
+> **Remapear no Recalbox:** o `remap.py` depende de `evdev`
+> (Python puro, não disponível no Recalbox) e não roda lá. Remapeie
+> primeiro numa máquina Linux normal (`sudo python3 remap.py`), depois
+> copie o `mapping.json` atualizado por `scp` para
+> `/recalbox/share/system/shanwan/mapping.json` e reinicie o serviço.
 
 > **Quirk sem systemd**: o quirk vai na linha de comando do kernel.
 > No Raspberry Pi: edite `/boot/cmdline.txt` e acrescente
@@ -245,16 +268,19 @@ ssh root@<ip-do-recalbox> 'rm -rf /recalbox/share/system/shanwan && \
 
 ## Arquivos
 
-| Arquivo                                   | Papel                                  |
-|-------------------------------------------|----------------------------------------|
-| `merger.py`                               | daemon (une nós evdev → uinput)        |
-| `recalbox-merger.py`                      | versão stdlib pura (Recalbox/Batocera) |
-| `setup.sh`                                | instala/remove tudo automaticamente    |
-| `install-recalbox.sh`                     | instala no Recalbox via custom.sh      |
-| `shanwan-merger.service`                  | unit systemd do daemon                 |
-| `STATUS.md`                               | histórico completo do projeto          |
+| Arquivo                  | Papel                                              |
+|---------------------------|----------------------------------------------------|
+| `merger.py`                | daemon principal (evdev), emula Xbox 360 Controller, lê `mapping.json` |
+| `recalbox-merger.py`       | mesma lógica em stdlib puro (Recalbox/Batocera)     |
+| `mapping.json`             | mapeamento físico→papel; editável só via `remap.py` |
+| `remap.py`                 | ferramenta interativa de remapeamento               |
+| `turbo_state.json`         | estado dos botões com turbo ativo (gerado em runtime, git-ignorado) |
+| `setup.sh`                 | instala/remove tudo automaticamente (systemd)       |
+| `install-recalbox.sh`      | instala no Recalbox via `custom.sh`                 |
+| `shanwan-merger.service`   | unit systemd do daemon                              |
+| `STATUS.md`                | histórico técnico completo do projeto (diagnóstico, decisões) |
 
-## Rollback manual
+## Rollback manual (systemd)
 
 ```bash
 sudo systemctl disable --now shanwan-merger.service usbcore-shanwan-quirk.service
